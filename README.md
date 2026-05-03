@@ -2,8 +2,6 @@
 
 Copy-based dotfile manager with provenance tracking. Drop-in replacement for [rotz](https://github.com/volllly/rotz) that copies files instead of symlinking them.
 
-Part of the [deck](https://github.com/choam-io/deck) distribution.
-
 ## Why
 
 Symlinks break in git worktrees. When you delete a worktree, symlinks pointing into it go dangling. Copy-based installs are self-contained -- the source can be deleted afterward.
