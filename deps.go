@@ -30,6 +30,7 @@ type DepEntry struct {
 	Dest   string            `yaml:"dest"`   // install destination
 	Run    string            `yaml:"run"`    // for curl-script: command to run with downloaded script as stdin
 	Tag    string            `yaml:"tag"`    // optional: pin to specific tag (otherwise latest)
+	Ref    string            `yaml:"ref"`    // optional: pin to specific commit SHA
 }
 
 // ── deps.lock.yaml schema ─────────────────────────────────────────
@@ -228,9 +229,13 @@ func (c *ghClient) downloadAndHash(url string) ([]byte, string, error) {
 // specified owner/repo and is not an "impostor" commit that resolves only
 // through GitHub's fork network.
 //
+// Tags are NOT trusted -- anyone who can push to a repo can create a tag
+// pointing at any SHA in the fork network. Only branch history proves
+// a commit was actually authored in this repo.
+//
 // Uses the technique from zizmor/clank:
-// 1. Fast: check branch_commits undocumented API
-// 2. Fallback: compare API against all branches and tags
+// 1. Fast: check branch_commits undocumented API (branches only)
+// 2. Fallback: compare API against all branches
 func (c *ghClient) verifyCommitBelongsToRepo(owner, repo, sha string) (bool, error) {
 	// Fast path: undocumented branch_commits API
 	url := fmt.Sprintf("https://github.com/%s/%s/branch_commits/%s", owner, repo, sha)
@@ -240,64 +245,44 @@ func (c *ghClient) verifyCommitBelongsToRepo(owner, repo, sha string) (bool, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "punch-dotfiles")
-	// Note: this endpoint is on github.com, not api.github.com. No auth needed.
 
 	resp, err := c.httpClient.Do(req)
 	if err == nil && resp.StatusCode == 200 {
 		defer resp.Body.Close()
 		var bc ghBranchCommits
 		if json.NewDecoder(resp.Body).Decode(&bc) == nil {
-			if len(bc.Branches) > 0 || len(bc.Tags) > 0 {
-				return true, nil // commit is in at least one branch or tag
+			// Only trust branches, not tags
+			if len(bc.Branches) > 0 {
+				return true, nil
 			}
-			return false, nil // commit not found in any branch or tag -- impostor
+			return false, nil
 		}
 	}
 	if resp != nil {
 		resp.Body.Close()
 	}
 
-	// Fast path failed, fall back to API-based verification
+	// Fast path failed, fall back to branch-only API verification
 	fmt.Fprintf(os.Stderr, "  ⚠ branch_commits API unavailable, using slow verification for %s/%s@%s\n", owner, repo, sha)
 
-	// Check if commit is at the tip of any tag
-	var tags []ghTag
-	if err := c.apiGetJSON(fmt.Sprintf("https://api.github.com/repos/%s/%s/tags?per_page=100", owner, repo), &tags); err != nil {
-		return false, fmt.Errorf("listing tags: %w", err)
-	}
-	for _, tag := range tags {
-		if tag.Commit.SHA == sha {
-			return true, nil
-		}
-	}
-
-	// Check if commit is at the tip of any branch
 	var branches []ghBranch
 	if err := c.apiGetJSON(fmt.Sprintf("https://api.github.com/repos/%s/%s/branches?per_page=100", owner, repo), &branches); err != nil {
 		return false, fmt.Errorf("listing branches: %w", err)
 	}
+
+	// Tip check: is the commit at HEAD of any branch?
 	for _, branch := range branches {
 		if branch.Commit.SHA == sha {
 			return true, nil
 		}
 	}
 
-	// Slow path: compare API -- check if any branch/tag contains the commit
+	// History check: is the commit reachable from any branch?
 	for _, branch := range branches {
 		var comp ghComparison
 		compURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/compare/refs/heads/%s...%s", owner, repo, branch.Name, sha)
 		if err := c.apiGetJSON(compURL, &comp); err != nil {
-			continue // 404 means diverged, skip
-		}
-		if comp.Status == "behind" || comp.Status == "identical" {
-			return true, nil
-		}
-	}
-	for _, tag := range tags {
-		var comp ghComparison
-		compURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/compare/refs/tags/%s...%s", owner, repo, tag.Name, sha)
-		if err := c.apiGetJSON(compURL, &comp); err != nil {
-			continue
+			continue // 404 means no common ancestor, skip
 		}
 		if comp.Status == "behind" || comp.Status == "identical" {
 			return true, nil
@@ -306,9 +291,6 @@ func (c *ghClient) verifyCommitBelongsToRepo(owner, repo, sha string) (bool, err
 
 	return false, nil
 }
-
-// ── Platform helpers ──────────────────────────────────────────────
-
 func currentPlatform() string {
 	os := runtime.GOOS
 	arch := runtime.GOARCH
@@ -413,10 +395,9 @@ func cmdDepsLock(dotfilesDir string, names []string) error {
 			// Resolve tag to commit SHA
 			sha, err := gh.resolveRef(owner, repo, rel.TagName)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  ⚠ could not resolve tag to commit: %v\n", err)
-			} else {
-				locked.Ref = sha
+				return fmt.Errorf("%s: cannot resolve tag %s to commit (required for verification): %w", name, rel.TagName, err)
 			}
+			locked.Ref = sha
 
 			// Hash assets
 			if dep.Assets != nil {
@@ -448,7 +429,10 @@ func cmdDepsLock(dotfilesDir string, names []string) error {
 
 		case "github-clone":
 			var sha string
-			if dep.Tag != "" {
+			if dep.Ref != "" {
+				// Explicit commit SHA pinning
+				sha = dep.Ref
+			} else if dep.Tag != "" {
 				sha, err = gh.resolveRef(owner, repo, dep.Tag)
 			} else {
 				// Resolve HEAD of default branch
@@ -476,10 +460,9 @@ func cmdDepsLock(dotfilesDir string, names []string) error {
 
 			sha, err := gh.resolveRef(owner, repo, tag)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  ⚠ could not resolve tag to commit: %v\n", err)
-			} else {
-				locked.Ref = sha
+				return fmt.Errorf("%s: cannot resolve tag %s to commit (required for verification): %w", name, tag, err)
 			}
+			locked.Ref = sha
 
 			// Hash the script file at the pinned ref
 			if dep.File != "" {
@@ -497,19 +480,20 @@ func cmdDepsLock(dotfilesDir string, names []string) error {
 			}
 		}
 
-		// Impostor commit verification
+		// Impostor commit verification -- fail closed
 		if locked.Ref != "" {
 			fmt.Printf("  🔍 verifying commit %s...\n", locked.Ref[:12])
 			belongs, err := gh.verifyCommitBelongsToRepo(owner, repo, locked.Ref)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  ⚠ impostor check failed: %v\n", err)
-				locked.Verified = false
-			} else if !belongs {
-				return fmt.Errorf("  🚨 IMPOSTOR COMMIT DETECTED: %s@%s does not belong to %s/%s", name, locked.Ref, owner, repo)
-			} else {
-				fmt.Printf("  ✅ commit verified\n")
-				locked.Verified = true
+				return fmt.Errorf("%s: impostor verification failed (refusing to lock): %w", name, err)
 			}
+			if !belongs {
+				return fmt.Errorf("🚨 IMPOSTOR COMMIT: %s@%s does not belong to %s/%s -- refusing to lock", name, locked.Ref, owner, repo)
+			}
+			fmt.Printf("  ✅ commit verified\n")
+			locked.Verified = true
+		} else {
+			return fmt.Errorf("%s: no commit ref resolved -- cannot verify, refusing to lock", name)
 		}
 
 		lf.Deps[name] = locked
