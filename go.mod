@@ -1,4 +1,4 @@
-module github.com/choam-io/punch
+module github.com/nodeselector/punch
 
 go 1.25.7
 

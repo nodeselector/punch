@@ -800,6 +800,14 @@ func resolveDotfilesDir() string {
 	return filepath.Join(home, "ghq", "github.com", "nodeselector", "ns-dotfiles")
 }
 
+func newShellCmd(cmd string) *exec.Cmd {
+	proc := exec.Command("bash", "-c", cmd)
+	proc.Stdout = os.Stdout
+	proc.Stderr = os.Stderr
+	proc.Stdin = os.Stdin
+	return proc
+}
+
 func usage() {
 	fmt.Fprintf(os.Stderr, `punch -- copy-based dotfile manager with provenance tracking
 
@@ -811,12 +819,18 @@ Commands:
   status                       Show drift between source and targets
   diff <target>                Show diff between source and installed target
   clean                        Remove orphaned lockfile entries
+  deps lock [name...]          Resolve deps to latest, write deps.lock.yaml
+  deps install                 Fetch deps per lockfile, verify digests
+  deps verify                  Check installed deps match lockfile
+  deps update [name...]        Alias for deps lock (re-resolve to latest)
+  deps list                    Show deps and their lock status
 
 Flags:
   --dotfiles <path>   Dotfiles directory (default: auto-detect from cwd)
 
 Environment:
   PUNCH_DOTFILES       Override dotfiles directory
+  GITHUB_TOKEN/GH_TOKEN  GitHub API token (for deps commands)
 `)
 }
 
@@ -879,6 +893,26 @@ func main() {
 			os.Exit(1)
 		}
 		err = cmdDiff(dotfilesDir, positional[1])
+	case "deps":
+		if len(positional) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: punch deps <lock|install|verify|update|list> [name...]")
+			os.Exit(1)
+		}
+		subcmd := positional[1]
+		names := positional[2:]
+		switch subcmd {
+		case "lock", "update":
+			err = cmdDepsLock(dotfilesDir, names)
+		case "install":
+			err = cmdDepsInstall(dotfilesDir)
+		case "verify":
+			err = cmdDepsVerify(dotfilesDir)
+		case "list", "ls":
+			err = cmdDepsList(dotfilesDir)
+		default:
+			fmt.Fprintf(os.Stderr, "unknown deps subcommand: %s\n", subcmd)
+			os.Exit(1)
+		}
 	case "clean":
 		err = cmdClean()
 	default:
