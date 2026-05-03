@@ -49,7 +49,6 @@ type LockedDep struct {
 	File      string                    `yaml:"file,omitempty"`
 	FileSHA   string                    `yaml:"file_sha256,omitempty"`
 	Assets    map[string]*LockedAsset   `yaml:"assets,omitempty"`
-	Verified  bool                      `yaml:"verified"`           // impostor check passed
 }
 
 type LockedAsset struct {
@@ -491,7 +490,6 @@ func cmdDepsLock(dotfilesDir string, names []string) error {
 				return fmt.Errorf("🚨 IMPOSTOR COMMIT: %s@%s does not belong to %s/%s -- refusing to lock", name, locked.Ref, owner, repo)
 			}
 			fmt.Printf("  ✅ commit verified\n")
-			locked.Verified = true
 		} else {
 			return fmt.Errorf("%s: no commit ref resolved -- cannot verify, refusing to lock", name)
 		}
@@ -523,10 +521,6 @@ func cmdDepsInstall(dotfilesDir string) error {
 			continue
 		}
 
-		if !locked.Verified {
-			fmt.Fprintf(os.Stderr, "  🚨 %s: skipping unverified dep (commit not verified as belonging to %s)\n", name, dep.Repo)
-			continue
-		}
 
 		fmt.Printf("\n\033[1mInstalling \033[38;5;12m%s\033[0m\n", name)
 
@@ -650,11 +644,6 @@ func cmdDepsVerify(dotfilesDir string) error {
 			problems++
 			continue
 		}
-		if !locked.Verified {
-			fmt.Printf("  ⚠  %s: commit not verified\n", name)
-			problems++
-			continue
-		}
 
 		switch dep.Type {
 		case "github-release":
@@ -709,11 +698,7 @@ func cmdDepsList(dotfilesDir string) error {
 		status := "🔓 unlocked"
 		version := ""
 		if ok {
-			if locked.Verified {
-				status = "✅"
-			} else {
-				status = "⚠ unverified"
-			}
+			status = "✅"
 			if locked.Tag != "" {
 				version = locked.Tag
 			} else if locked.Ref != "" {
